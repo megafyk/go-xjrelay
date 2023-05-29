@@ -49,99 +49,61 @@ func relay() {
 	}
 }
 
-// bounce between conn1 and conn 2
+// bounce between conn1 and conn 2 use disruptor
 func bounce(conn1 net.Conn, conn2 net.Conn) {
 	defer closeConn(conn1)
 	defer closeConn(conn2)
 
-	//_, err := io.Copy(conn2, conn1)
-	//if err != nil && !isNetConnClosedErr(err) {
-	//	log.Err(err).Msgf("failed to write connection from %s to %s", conn1.RemoteAddr(), conn2.RemoteAddr())
-	//	return
-	//}
-
-	//
-	//go func() {
-	//	for {
-	//		data := make([]byte, 1024)
-	//		n, err := conn1.Read(data)
-	//		if err != nil {
-	//			log.Err(err).Msgf("failed to read conn1")
-	//			return
-	//		}
-	//
-	//		for i := 0; i < n; i++ {
-	//			err := buffer.Write(int(data[i]))
-	//			if err != nil {
-	//				log.Err(err).Msgf("failed to write conn2")
-	//				return
-	//			}
-	//		}
-	//	}
-	//}()
-	//
-	//for {
-	//	data := make([]byte, 1024)
-	//	n, err := conn2.Read(data)
-	//	if err != nil {
-	//		log.Err(err).Msgf("failed to read conn2")
-	//		return
-	//	}
-	//
-	//	for i := 0; i < n; i++ {
-	//		value, _ := buffer.Read()
-	//		data[i] = byte(value)
-	//	}
-	//
-	//	_, err = conn2.Write(data[:n])
-	//	if err != nil {
-	//		return
-	//	}
-	//}
-
 	buffer := NewRingBuffer(1024)
-	done := make(chan bool)
+	t := false
 	go func() {
 		for {
-			data := make([]byte, 1024)
-			_, err := conn1.Read(data)
-			log.Info().Msg(string(data))
+			data := make([]byte, 32*1024)
+			n, err := conn1.Read(data)
 			if err != nil {
-				if err != io.EOF {
+				if !isNetConnClosedErr(err) {
 					log.Err(err).Msgf("failed to read conn1")
 				}
-				done <- true
+				t = true
 				return
 			}
-			err = buffer.Write(data)
-			if err != nil {
-				log.Err(err).Msgf("failed to write data from conn1 to buffer")
-				return
+			if n > 0 {
+				err = buffer.Write(data[:n])
+				if err != nil {
+					log.Err(err).Msgf("failed to write data from conn1 to buffer")
+					return
+				}
 			}
 		}
 	}()
-	for {
-		if <-done {
-			break
-		}
+
+	for !t {
 		data, _ := buffer.Read()
-		_, err := conn2.Write(data)
-		if err != nil {
-			log.Err(err).Msgf("failed to write data from buffer to conn2")
+		if data != nil {
+			_, err := conn2.Write(data)
+			if err != nil {
+				log.Err(err).Msgf("failed to write data from buffer to conn2")
+			}
 		}
 	}
+	log.Info().Msgf("end bounce %s -> %s", conn1.RemoteAddr(), conn2.RemoteAddr())
 
-	//buf := make([]byte, 32*1024)
-	//for {
-	//	n, err := conn1.Read(buf)
-	//	if err != nil {
-	//		return
-	//	}
-	//	_, err = conn2.Write(buf[:n])
-	//	if err != nil {
-	//		return
-	//	}
-	//}
+}
+
+// bounce between conn1 and conn 2 use default copy
+func bounceDefault(conn1 net.Conn, conn2 net.Conn) {
+	defer closeConn(conn1)
+	defer closeConn(conn2)
+	_, err := io.Copy(conn2, conn1)
+	if err != nil && !isNetConnClosedErr(err) {
+		log.Err(err).Msgf("failed to write connection from %s to %s", conn1.RemoteAddr(), conn2.RemoteAddr())
+		return
+	}
+}
+
+// bounce between conn1 and conn 2 use zero copy optimization
+func bounceZeroCopy(conn1 net.Conn, conn2 net.Conn) {
+	panic("not implemented yet")
 }
 
 // close socket connection
@@ -149,6 +111,8 @@ func closeConn(conn net.Conn) {
 	err := conn.Close()
 	if err != nil && !isNetConnClosedErr(err) {
 		log.Err(err).Msgf("failed to close connection %s", conn.RemoteAddr())
+	} else {
+		log.Info().Msgf("close connection to %s", conn.RemoteAddr())
 	}
 }
 
