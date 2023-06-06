@@ -18,4 +18,4 @@ Please make sure to update tests and benchmark as appropriate.
 
 [-] benchmark for sure :))
 
-[-] zero copy
+[x] zero copy
