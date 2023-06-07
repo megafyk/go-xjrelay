@@ -109,7 +109,6 @@ func bounceDefault(conn1 net.Conn, conn2 net.Conn) {
 		n, err := conn1.Read(buffer)
 		if err != nil {
 			if isNetConnClosedErr(err) {
-				log.Err(err).Msgf("failed to read data from closed connection %s", conn1.RemoteAddr())
         return
 			}
 		}
@@ -118,8 +117,7 @@ func bounceDefault(conn1 net.Conn, conn2 net.Conn) {
 
 		_, err = conn2.Write(data)
 		if err != nil {
-			if !isNetConnClosedErr(err) {
-				log.Err(err).Msgf("failed to write data to closed connection %s", conn2.RemoteAddr())
+			if isNetConnClosedErr(err) {
 				return
 			}
 		}
@@ -155,12 +153,10 @@ func bounce(conn1 net.Conn, conn2 net.Conn) {
   for {
 		_, err := syscall.Splice(int(fileConn1.Fd()), nil, pipe[1], nil, 1024, 1)
 		if err != nil {	
-		  log.Err(err).Msgf("failed to read fd %d %s", fileConn1, pipe[1])	
 			return
 		}
 		_, err = syscall.Splice(pipe[0], nil, int(fileConn2.Fd()), nil, 1024, 1)
 		if err != nil {
-      log.Err(err).Msgf("failed to write fd %d %s", fileConn2, pipe[0])
 			return
 		}
 	}
