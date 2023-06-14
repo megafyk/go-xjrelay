@@ -11,16 +11,14 @@ import (
 )
 
 const (
-	addrA = "localhost:8080"
-	addrB = "localhost:8081"
-)
-
-var (
-	done = make(chan int, 2)
+	// These constants are pulled from kernel source.
+	SPLICE_F_MOVE     = 0x01
+	SPLICE_F_MORE     = 0x04
+	SPLICE_F_NONBLOCK = 0x02
 )
 
 func main() {
-	process2()
+	process1()
 }
 
 func process1() {
@@ -32,17 +30,10 @@ func process1() {
 	close(done)
 }
 
-func process2() {
-	go initServer(addrA)
-	go initServer(addrB)
-	log.Info().Msg("start server...")
-	<-done
-}
-
 func relay() {
 	// init A listener
 	addrA := "localhost:8080"
-	addrB := "192.168.112.118:22"
+	addrB := "10.58.244.250:8082"
 	ln, err := net.Listen("tcp", addrA)
 	if err != nil {
 		log.Err(err).Msgf("failed to create listener to %s", addrA)
@@ -120,14 +111,16 @@ func bounceCopy(conn1 net.Conn, conn2 net.Conn) {
 	}
 }
 
-func bounceDefault(conn1 net.Conn, conn2 net.Conn) {
-	buffer := make([]byte, 1024)
+func bounceDefault(conn1 net.Conn, conn2 net.Conn) error {
+	log.Info().Msg("start bounceDefault")
+	buffer := make([]byte, 4096)
 	for {
 		n, err := conn1.Read(buffer)
 		if err != nil {
 			if isNetConnClosedErr(err) {
-				return
+				return nil
 			}
+			return err
 		}
 
 		data := buffer[:n]
@@ -135,20 +128,21 @@ func bounceDefault(conn1 net.Conn, conn2 net.Conn) {
 		_, err = conn2.Write(data)
 		if err != nil {
 			if isNetConnClosedErr(err) {
-				return
+				return nil
 			}
+			return err
 		}
 	}
 }
 
 // bounce between conn1 and conn 2 use zero copy optimization
-func bounce(conn1 net.Conn, conn2 net.Conn) {
-
+func bounce(conn1 net.Conn, conn2 net.Conn) error {
+	log.Info().Msg("start bounce")
 	pipe := make([]int, 2)
 	// init kernel pipe
 	if err := syscall.Pipe(pipe); err != nil {
 		log.Err(err).Msgf("failed to create pipe")
-		return
+		return nil
 	}
 
 	defer syscall.Close(pipe[0])
@@ -156,23 +150,31 @@ func bounce(conn1 net.Conn, conn2 net.Conn) {
 
 	fileConn1, err := conn1.(*net.TCPConn).File()
 	if err != nil {
+		if isNetConnClosedErr(err) {
+			return nil
+		}
 		log.Err(err).Msgf("cannot get file descriptor of connection from %s", conn1.RemoteAddr())
-		return
 	}
 	fileConn2, err := conn2.(*net.TCPConn).File()
 	if err != nil {
+		if isNetConnClosedErr(err) {
+			return nil
+		}
 		log.Err(err).Msgf("cannot get file descriptor of connection from %s", conn2.RemoteAddr())
-		return
 	}
 
 	for {
-		_, err := syscall.Splice(int(fileConn1.Fd()), nil, pipe[1], nil, 1024, 1)
+		n, err := syscall.Splice(int(fileConn1.Fd()), nil, pipe[1], nil, 4096, SPLICE_F_MOVE)
 		if err != nil {
-			return
+			return nil
 		}
-		_, err = syscall.Splice(pipe[0], nil, int(fileConn2.Fd()), nil, 1024, 1)
+		if n <= 0 {
+			return nil
+		}
+		log.Info().Msgf("bounce %d", n)
+		_, err = syscall.Splice(pipe[0], nil, int(fileConn2.Fd()), nil, int(n), SPLICE_F_MOVE)
 		if err != nil {
-			return
+			return nil
 		}
 	}
 }
@@ -205,37 +207,6 @@ func closeListener(ln net.Listener) {
 	err := ln.Close()
 	if err != nil {
 		log.Err(err).Msgf("failed to close listener %s", ln.Addr())
-	}
-}
-
-func initServer(addr string) {
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Err(err).Msgf("failed to create listen server %s", addr)
-		done <- 1
-		return
-	}
-	defer func(ln net.Listener) {
-		err := ln.Close()
-		if err != nil {
-			log.Err(err).Msg("err when close listener")
-			return
-		}
-	}(ln)
-	if err != nil {
-		log.Err(err)
-		return
-	}
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Err(err).Msg("error when accept connection")
-		}
-		_, err = io.Copy(io.Discard, conn)
-		if err != nil {
-			log.Err(err).Msg("error when copy data")
-		}
 	}
 }
 
