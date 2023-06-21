@@ -1,54 +1,48 @@
 package main
 
 import (
-	"math/rand"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"net"
 	"testing"
-
-	"github.com/rs/zerolog"
 )
 
 func BenchmarkBounceDefault(b *testing.B) {
-	conn1, conn2 := net.Pipe()
+	conn1, _ := net.Dial("tcp", addrA)
+	conn2, _ := net.Dial("tcp", addrB)
 	defer conn1.Close()
 	defer conn2.Close()
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	go func() {
-		buffer := make([]byte, 1024)
-		for {
-			conn2.Read(buffer)
-		}
-	}()
 
 	go bounceDefault(conn1, conn2)
-	data := make([]byte, 1024)
-	rand.Read(data)
 
+	msg := "Hello from Client"
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		conn1.Write(data)
+	for i := 0; i < 1000000; i++ {
+		_, err := conn1.Write([]byte(msg))
+		if err != nil {
+			log.Err(err).Msgf("cannot write")
+			return
+		}
 	}
 }
 
 func BenchmarkBounce(b *testing.B) {
-	conn1, conn2 := net.Pipe()
+	conn1, _ := net.Dial("tcp", addrA)
+	conn2, _ := net.Dial("tcp", addrB)
 	defer conn1.Close()
 	defer conn2.Close()
 	zerolog.SetGlobalLevel(zerolog.Disabled)
-	go func() {
-		buffer := make([]byte, 1024)
-		for {
-			conn2.Read(buffer)
-		}
-	}()
 
 	go bounce(conn1, conn2)
-	data := make([]byte, 1024)
-	rand.Read(data)
 
+	msg := "Hello from Client"
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		conn1.Write(data)
+	for i := 0; i < 1000000; i++ {
+		_, err := conn1.Write([]byte(msg))
+		if err != nil {
+			log.Err(err).Msgf("cannot write")
+			return
+		}
 	}
 }
-

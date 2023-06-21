@@ -6,10 +6,24 @@ import (
 	"github.com/rs/zerolog/log"
 	"io"
 	"net"
+	"sync/atomic"
 	"syscall"
 )
 
+const (
+	addrA = "localhost:8080"
+	addrB = "localhost:8081"
+)
+
+var (
+	done = make(chan int, 2)
+)
+
 func main() {
+	process2()
+}
+
+func process1() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	go relay()
 	done := make(chan bool)
@@ -18,10 +32,17 @@ func main() {
 	close(done)
 }
 
+func process2() {
+	go initServer(addrA)
+	go initServer(addrB)
+	log.Info().Msg("start server...")
+	<-done
+}
+
 func relay() {
 	// init A listener
 	addrA := "localhost:8080"
-  addrB := "192.168.112.18:22"
+	addrB := "192.168.112.118:22"
 	ln, err := net.Listen("tcp", addrA)
 	if err != nil {
 		log.Err(err).Msgf("failed to create listener to %s", addrA)
@@ -46,13 +67,13 @@ func relay() {
 
 		go bounce(conn1, conn2)
 		go bounce(conn2, conn1)
+		defer closeConn(conn1)
+		defer closeConn(conn2)
 	}
 }
 
 // bounce between conn1 and conn 2 use disruptor
 func bounceDisruptor(conn1 net.Conn, conn2 net.Conn) {
-	defer closeConn(conn1)
-	defer closeConn(conn2)
 
 	buffer := NewRingBuffer(1024)
 	t := false
@@ -92,8 +113,6 @@ func bounceDisruptor(conn1 net.Conn, conn2 net.Conn) {
 
 // bounce between conn1 and conn 2 use default copy
 func bounceCopy(conn1 net.Conn, conn2 net.Conn) {
-	defer closeConn(conn1)
-	defer closeConn(conn2)
 	_, err := io.Copy(conn2, conn1)
 	if err != nil && !isNetConnClosedErr(err) {
 		log.Err(err).Msgf("failed to write connection from %s to %s", conn1.RemoteAddr(), conn2.RemoteAddr())
@@ -102,14 +121,12 @@ func bounceCopy(conn1 net.Conn, conn2 net.Conn) {
 }
 
 func bounceDefault(conn1 net.Conn, conn2 net.Conn) {
-	defer closeConn(conn1)
-	defer closeConn(conn2)
 	buffer := make([]byte, 1024)
 	for {
 		n, err := conn1.Read(buffer)
 		if err != nil {
 			if isNetConnClosedErr(err) {
-        return
+				return
 			}
 		}
 
@@ -126,8 +143,6 @@ func bounceDefault(conn1 net.Conn, conn2 net.Conn) {
 
 // bounce between conn1 and conn 2 use zero copy optimization
 func bounce(conn1 net.Conn, conn2 net.Conn) {
-	defer conn1.Close()
-	defer conn2.Close()
 
 	pipe := make([]int, 2)
 	// init kernel pipe
@@ -136,23 +151,23 @@ func bounce(conn1 net.Conn, conn2 net.Conn) {
 		return
 	}
 
-  defer syscall.Close(pipe[0])
-  defer syscall.Close(pipe[1])
+	defer syscall.Close(pipe[0])
+	defer syscall.Close(pipe[1])
 
-  fileConn1, err := conn1.(*net.TCPConn).File()
-  if err != nil {
-    log.Err(err).Msgf("cannot get file descriptor of connection from %s", conn1.RemoteAddr())
-    return
-  }
-  fileConn2, err := conn2.(*net.TCPConn).File()
-  if err != nil {
-    log.Err(err).Msgf("cannot get file descriptor of connection from %s", conn2.RemoteAddr())
-    return
-  }
-	
-  for {
+	fileConn1, err := conn1.(*net.TCPConn).File()
+	if err != nil {
+		log.Err(err).Msgf("cannot get file descriptor of connection from %s", conn1.RemoteAddr())
+		return
+	}
+	fileConn2, err := conn2.(*net.TCPConn).File()
+	if err != nil {
+		log.Err(err).Msgf("cannot get file descriptor of connection from %s", conn2.RemoteAddr())
+		return
+	}
+
+	for {
 		_, err := syscall.Splice(int(fileConn1.Fd()), nil, pipe[1], nil, 1024, 1)
-		if err != nil {	
+		if err != nil {
 			return
 		}
 		_, err = syscall.Splice(pipe[0], nil, int(fileConn2.Fd()), nil, 1024, 1)
@@ -191,4 +206,71 @@ func closeListener(ln net.Listener) {
 	if err != nil {
 		log.Err(err).Msgf("failed to close listener %s", ln.Addr())
 	}
+}
+
+func initServer(addr string) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Err(err).Msgf("failed to create listen server %s", addr)
+		done <- 1
+		return
+	}
+	defer func(ln net.Listener) {
+		err := ln.Close()
+		if err != nil {
+			log.Err(err).Msg("err when close listener")
+			return
+		}
+	}(ln)
+	if err != nil {
+		log.Err(err)
+		return
+	}
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Err(err).Msg("error when accept connection")
+		}
+		_, err = io.Copy(io.Discard, conn)
+		if err != nil {
+			log.Err(err).Msg("error when copy data")
+		}
+	}
+}
+
+type RingBuffer struct {
+	data       [][]byte
+	readIndex  int32
+	writeIndex int32
+}
+
+func NewRingBuffer(size int) *RingBuffer {
+	return &RingBuffer{
+		data:       make([][]byte, size),
+		readIndex:  0,
+		writeIndex: 0,
+	}
+}
+
+func (r *RingBuffer) Write(value []byte) error {
+	if r.writeIndex-r.readIndex == int32(len(r.data)) {
+		return errors.New("buffer is full")
+	}
+
+	r.data[r.writeIndex%int32(len(r.data))] = value
+	atomic.AddInt32(&r.writeIndex, 1)
+
+	return nil
+}
+
+func (r *RingBuffer) Read() ([]byte, error) {
+	if r.writeIndex == r.readIndex {
+		return nil, errors.New("buffer is empty")
+	}
+
+	value := r.data[r.readIndex%int32(len(r.data))]
+	atomic.AddInt32(&r.readIndex, 1)
+
+	return value, nil
 }
